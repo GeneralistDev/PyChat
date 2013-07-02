@@ -18,20 +18,27 @@ class CommandHandler:
 		
 	def handle(self, session, line):
 		'Handle a received line from a given session'
-		if not line.strip(): return
 		# Split off the command:
-		parts = line.split(' ', 1)
-		cmd = parts[0]
-		try: line = parts[1].strip()
-		except IndexError: line = ''
-		# Try to find a handler:
-		meth = getattr(self, 'do_'+cmd, None)
-		try:
-			# Assume it's callable:
-			meth(session, line)
-		except TypeError:
-			# If it isn't, respond to the unknown command:
-			self.unknown(session, cmd)
+		if line[0] == '/':
+			line = line[1:]
+			if not line.strip(): return
+			parts = line.split(' ', 1)
+			cmd = parts[0]
+			try: line = parts[1].strip()
+			except IndexError: line = ''
+			# Try to find a handler:
+			meth = getattr(self, 'do_'+cmd, None)
+			try:
+				# Assume it's callable
+				meth(session, line)
+			except TypeError:
+				# If it isn't, respond to the unknown command:
+				self.unknown(session, cmd)
+		else:
+			try:
+				self.do_say(session, line)
+			except TypeError:
+				self.unknown(session, line)
 		
 class Room(CommandHandler):
 	"""
@@ -42,6 +49,7 @@ class Room(CommandHandler):
 	def __init__(self, server):
 		self.server = server
 		self.sessions = []
+		self.name = None
 		
 	def add(self, session):
 		'A session (user) has entered the room'
@@ -56,11 +64,13 @@ class Room(CommandHandler):
 	def do_logout(self, session, line):
 		'Respond to the logout command'
 		raise EndSession
-		
+			
 class LoginRoom(Room):
 	"""
 	A room meant for a single person who has just connected.
 	"""
+	def do_say(self, session, line):
+		session.push('You are not logged in; please login using "Login <nick>"\r\n')
 	def add(self, session):
 		Room.add(self, session)
 		# When a user enters, greet him/her:
@@ -89,6 +99,18 @@ class ChatRoom(Room):
 	A room meant for multiple users who can chat with the others in
 	the room.
 	"""
+	def do_join(self, session, line):
+		try:
+			if line[0] == '#':
+				if line in self.server.rooms:
+					session.enter(self.server.rooms[line])
+				else:
+					newRoom = ChatRoom(self)
+					newRoom.name = line
+					self.server.rooms[line] = newRoom
+			else:
+				session.push("This is not a valid room name. Rooms need to start with a '#'")
+		except TypeError: session.push("You have not entered anything")
 	def add(self, session):
 		# Notify everyone that a new user has entered:
 		self.broadcast(session.name + ' has entered the room.\r\n')
@@ -110,6 +132,10 @@ class ChatRoom(Room):
 		session.push('The following are logged in:\r\n')
 		for name in self.server.users:
 			session.push(name + '\r\n')
+			
+	def do_leave(self, session, line):
+		session.leave(self)
+	
 	def do_help(self, session, line):
 		'Sends a list of commands that can be used'
 		session.push('You can use the following commands on this server:\nhelp\nsay\nlook\nwho\nlogout\r\n')
@@ -141,18 +167,25 @@ class ChatSession(async_chat):
 	def enter(self, room):
 		# Remove self from current room and add self to
 		# next room...
-		try: cur = self.room
+		try: cur = self.room			# temporarily store
 		except AttributeError: pass
 		else: cur.remove(self)
 		self.room = room
+		room.add(self)
+		
+	def leave(self):
+		try: cur = self.room
+		except AttributeError: pass
+		else: cur.remove(self)
+		self.room = self.server.main_room
 		room.add(self)
 		
 	def collect_incoming_data(self, data):
 		self.data.append(data)
 		
 	def found_terminator(self):
-		line = ''.join(self.data)
-		self.data = []
+		line = ''.join(self.data) #Appends self.data (recieved data to line string)
+		self.data = [] # Clears self.data
 		try: self.room.handle(self, line)
 		except EndSession:
 			self.handle_close()
@@ -172,8 +205,9 @@ class ChatServer(dispatcher):
 		self.bind(('', port))
 		self.listen(5)
 		self.name = name
-		self.users = {}
+		self.users = {} #Dictionary of Users
 		self.main_room = ChatRoom(self)
+		self.rooms = {} #Dictionary of Rooms
 	def handle_accept(self):
 		conn, addr = self.accept()
 		ChatSession(self, conn)
